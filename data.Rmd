@@ -1,0 +1,241 @@
+---
+title: "Data manipulation and EDA"
+author: "Yeji Sohn"
+date: '2023-01-09'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(digits = 3)
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(plm))
+suppressPackageStartupMessages(library(gplots))
+suppressPackageStartupMessages(library(glmmLasso))
+suppressPackageStartupMessages(library(rempsyc))
+suppressPackageStartupMessages(library(usmap))
+suppressPackageStartupMessages(library(ggplot2))
+knitr::opts_chunk$set(    
+    fig.height = 4, 
+    fig.width = 7,
+    fig.align   = 'center',
+    echo        = FALSE,     
+    message     = FALSE, 
+    warning     = FALSE
+    ) 
+```
+
+# Load data
+
+```{r}
+# Read in data
+file_path <- 'usa_00001.csv.gz'
+df <- read.csv(file_path)
+```
+
+```{r}
+# Format occupation code
+df$OCCSOC <- gsub(" ", "", df$OCCSOC, fixed = TRUE)
+
+# Unemployed last 5 years or never worked
+df <- df %>%
+  filter(OCCSOC != "0") %>% 
+  filter(!OCCSOC %in%  c("559920","559920",	"999920",	"999920",	"999920",	"999920",	"999920"))
+df <- df %>%
+  mutate(OCCSOC = substr(OCCSOC, 1, 2))
+
+# Missing values
+df <- df %>%
+  filter(!INCWAGE %in% c(999999, 999998))
+df <- df %>%
+  filter(TRANWORK != 0)
+df <- df %>%
+  filter((EMPSTAT == 1) | (EMPSTAT == 2))
+```
+
+
+```{r}
+# Create summary table of average income by Metro status
+df_metro_status <- df %>%
+  mutate(METRO = ifelse((METRO == 1) |(METRO == 0) , 0, 1))
+
+table_metro_status <- df_metro_status %>%
+  group_by(METRO, YEAR) %>%
+  filter(OCCSOC %in% c(41, 39, 33, 29, 53, 31, 45, 51, 49, 47, 35, 37)) %>%
+  summarise(average_income = mean(INCTOT))
+
+table_metro_status <- pivot_wider(
+  table_metro_status,
+  id_cols = c(YEAR),
+  names_from = METRO,
+  values_from = average_income,
+  names_prefix = "average_income_"
+)
+
+colnames(table_metro_status) <- c("YEAR", "In metropolitan area", "Not in metropolitan area")
+table_metro_status$YEAR <- as.character(table_metro_status$YEAR)
+
+table_metro_nice <- nice_table(
+  table_metro_status, 
+  title = c("Table 1", "Average Income of Metropolitan Area vs Non-Metropolitan Area"),
+  )
+
+# Create summary table of average income by Metro status
+df_city_status <- df %>%
+  mutate(CITY = ifelse((METRO == 2) |(METRO == 4) , 0, 1))
+
+table_city_status <- df_city_status %>%
+  group_by(CITY, YEAR) %>%
+  filter(OCCSOC %in% c(41, 39, 33, 29, 53, 31, 45, 51, 49, 47, 35, 37)) %>%
+  summarise(average_income = mean(INCTOT))
+
+colnames(table_city_status) <- c("YEAR", "In central city", "Not in central city")
+table_city_status$YEAR <- as.character(table_city_status$YEAR)
+
+table_city_nice <- nice_table(
+  table_city_status, 
+  title = c("Table 3", "Average Income in Central City vs Non-city Area"),
+  )
+
+#flextable::save_as_docx(table_city_nice, path = "Tables/table3.docx")
+```
+
+
+```{r}
+# Rename column to match ACS terminology
+df_clean <- df %>%
+  rename("WGTP" = "HHWT", "PWGTP" = "PERWT")
+
+# Select variables to use
+df_clean <- df_clean %>%
+  select(YEAR, PWGTP, STATEFIP, COUNTYFIP, PUMA, SEX, AGE, INCTOT, INCWAGE, TRANWORK, OCCSOC, 
+         RACE, PERNUM, SAMPLE, SERIAL, EDUC, UHRSWORK, METRO)
+
+head(df_clean, 1)
+
+# Create variables
+df_clean <- df_clean %>%
+  mutate(id = paste0(SAMPLE,SERIAL,PERNUM)) %>%
+  select(-c(PERNUM, SAMPLE, SERIAL))
+
+df_clean <- df_clean %>%
+  mutate(REMOTE = ifelse(TRANWORK==80, 1, 0)) %>%
+  select(-c(TRANWORK))
+
+df_clean <- df_clean %>%
+  mutate(FEMALE = ifelse(SEX==2, 1, 0)) %>%
+  select(-c(SEX))
+```
+
+```{r}
+# Aggregate data
+agg4 <- df_clean %>% 
+  filter(OCCSOC %in% c(41, 39, 33, 29, 53, 31, 45, 51, 49, 47, 35, 37)) %>%
+  group_by(PUMA, YEAR) %>% 
+    summarize(
+      WAGE = weighted.mean(INCWAGE, PWGTP),
+      INCOME = weighted.mean(INCTOT, PWGTP),
+      AGE = weighted.mean(AGE, PWGTP),
+      HRSWORK = weighted.mean(UHRSWORK, PWGTP),
+      EDUC = weighted.mean(EDUC, PWGTP),
+      FEMALE = weighted.mean(FEMALE, PWGTP),
+    )
+
+city <- df_clean %>%
+  group_by(PUMA, YEAR) %>%
+  mutate(CITY = ifelse((METRO == 2) |(METRO == 4) , 0, 1)) %>%
+  summarise(PUMA, YEAR, CITY) %>% 
+  distinct(PUMA, YEAR, CITY)
+
+df_clean_wide <- df_clean %>%
+  pivot_wider(names_from = "RACE", values_from = "RACE", names_prefix = "RACE",
+              values_fn = list(RACE = length), values_fill = 0)
+
+df_clean_wide <- df_clean_wide %>%
+  pivot_wider(names_from = "OCCSOC", values_from = "OCCSOC", names_prefix = "OCCSOC",
+              values_fn = list(OCCSOC = length), values_fill = 0)
+
+race_col <- colnames(df_clean_wide[, grep("RACE", colnames(df_clean_wide))])
+occ_col <- colnames(df_clean_wide[, grep("OCCSOC", colnames(df_clean_wide))])
+
+agg1 <- df_clean_wide %>% 
+  group_by(PUMA, YEAR) %>% 
+    summarize(
+      POPULATION = sum(PWGTP),
+      REMOTE = weighted.mean(REMOTE, PWGTP)
+    )
+
+agg2 <- df_clean_wide %>% 
+  group_by(PUMA, YEAR) %>% 
+    summarise(across(all_of(race_col), ~ weighted.mean(.x, PWGTP)))
+
+agg3 <- df_clean_wide %>% 
+  group_by(PUMA, YEAR) %>% 
+    summarise(across(all_of(occ_col), ~ weighted.mean(.x, PWGTP)))
+
+agg_df <- purrr::reduce(list(agg1, agg2, agg3, agg4), dplyr::full_join, by = c("PUMA", "YEAR"))
+
+# write.csv(agg_df, "agg.csv", row.names=FALSE)
+```
+
+## MAP
+
+```{r}
+# Create before/after pandemic remotework share by state
+state_data_pre <- df %>%
+  filter(YEAR == 2019)%>%
+  mutate(REMOTE = ifelse(TRANWORK==80, 1, 0), fips = STATEFIP) %>%
+  group_by(fips) %>%
+  summarise(fips, REMOTE = weighted.mean(REMOTE, PERWT)*100) %>%
+  distinct(fips, REMOTE)
+
+state_data_post <- df %>%
+  filter(YEAR == 2020)%>%
+  mutate(REMOTE = ifelse(TRANWORK==80, 1, 0), fips = STATEFIP) %>%
+  group_by(fips) %>%
+  summarise(fips, REMOTE = weighted.mean(REMOTE, PERWT)*100) %>%
+  distinct(fips, REMOTE)
+
+state_data_diff <- merge(state_data_pre, state_data_post, by="fips")
+state_data_diff <- state_data_diff %>%
+  mutate(REMOTE = (REMOTE.y - REMOTE.x)) %>%
+  select(fips, REMOTE)
+```
+
+```{r}
+# Create Map
+plot_usmap(regions = "counties") + 
+  labs(title = "US Counties",
+       subtitle = "This is a blank map of the counties of the United States.") + 
+  theme(panel.background = element_rect(color = "black", fill = "lightblue"))
+
+plot_usmap(data = state_data_pre, values = "REMOTE") + 
+  scale_fill_continuous(low ='black', high = 'white', limits = c(0, 0.25), breaks = c(0.05, 0.1, 0.15, 0.2), 
+                        name="Share of residents\nremote working") +
+  labs(title = "Remote Working by State (2019)")+ 
+  theme(legend.position = "right")
+
+plot_usmap(data = state_data_post, values = "REMOTE") + 
+  scale_fill_continuous(low ='black', high = 'white', limits = c(0, 0.25), breaks = c(0.05, 0.1, 0.15, 0.2), 
+                        name="Share of residents\nremote working") +
+  labs(title = "Remote Working by State (2020)")+ 
+  theme(legend.position = "right")
+
+plot_usmap(data = state_data_diff, values = "REMOTE") + 
+  scale_fill_continuous(low ='black', high = 'white',
+                        limits = c(0, 10.5),
+                        labels=c("0.0","2.5","5.0", "7.5", "10.5 or more"),
+                        name="Pct change ") +
+  labs(title = "Change in Number of Remote Working Residents by State (2019-2020)")+ 
+  theme(legend.position = "right")
+
+mean(state_data_post$REMOTE)
+
+state_data_change %>% 
+  ggplot(aes(fips)) +
+  geom_polygon(aes(fill=is_example), color="gray70") +
+  coord_map() +
+  scale_fill_manual(values=c("TRUE"="red", "FALSE"="gray90"))
+```

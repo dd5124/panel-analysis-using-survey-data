@@ -1,0 +1,487 @@
+---
+title: "Analysis"
+author: "Yeji Sohn"
+date: '2023-03-03'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.height = 4, 
+    fig.width = 7,
+    fig.align   = 'center',
+    echo        = FALSE,     
+    message     = FALSE, 
+    warning     = FALSE,
+    digits = 3)
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(plm))
+suppressPackageStartupMessages(library(gplots))
+suppressPackageStartupMessages(library(glmmLasso))
+suppressPackageStartupMessages(library(rempsyc))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(lmtest))
+suppressPackageStartupMessages(library(car))
+suppressPackageStartupMessages(library(stargazer))
+suppressPackageStartupMessages(library(sandwich))
+suppressPackageStartupMessages(library(panelAR))
+suppressPackageStartupMessages(library(aTSA))
+```
+
+# Data Summary
+```{r}
+file_path = "agg.csv"
+agg_df <- read.csv(file_path)
+head(agg_df)
+```
+## Distribution of variables of interest
+```{r}
+hist(agg_df$REMOTE)
+```
+
+```{r}
+hist(agg_df$INCOME)
+```
+Both the dependent and independent variable has strongly positively skewed distribution and normal distribution cannot be assumed.
+
+## Descriptive statistics of variables
+```{r}
+# Summary of each variables
+pre_pandemic_summary <- agg_df %>% 
+  filter(YEAR %in% c(2018, 2019))%>%
+  summarise_all(mean) %>%
+  select(-c(PUMA, YEAR))
+
+pandemic_summary <- agg_df %>% 
+  filter(YEAR %in% c(2020, 2021))%>%
+  summarise_all(mean) %>%
+  select(-c(PUMA, YEAR))
+
+mean_summary <- rbind(pre_pandemic_summary, pandemic_summary) %>% 
+  t() %>% 
+  as.data.frame() %>%
+  rename("Pre-Pandemic_mean" = V1, "Pandemic_mean" = V2)
+
+mean_summary <- cbind(var = rownames(mean_summary), mean_summary)
+rownames(mean_summary) <- 1:nrow(mean_summary)
+
+pre_pandemic_summary <- agg_df %>% 
+  filter(YEAR %in% c(2018, 2019))%>%
+  summarise_all(sd) %>%
+  select(-c(PUMA, YEAR))
+
+pandemic_summary <- agg_df %>% 
+  filter(YEAR %in% c(2020, 2021))%>%
+  summarise_all(sd) %>%
+  select(-c(PUMA, YEAR))
+
+sd_summary <- rbind(pre_pandemic_summary, pandemic_summary) %>% 
+  t() %>% 
+  as.data.frame() %>%
+  rename("Pre-Pandemic_sd" = V1, "Pandemic_sd" = V2)
+
+sd_summary <- cbind(var = rownames(sd_summary), sd_summary)
+rownames(sd_summary) <- 1:nrow(sd_summary)
+
+t4 <- left_join(mean_summary, sd_summary, by="var")
+t4 <- t4[,c(1,2, 4, 3, 5)]
+
+colnames(t4) <- c("Var", "T1.mean", "T1.sd", "T2.mean", "T2.sd")
+
+table4_p <- nice_table(t4, separate.header = TRUE, italics = seq(t4),
+                       title = c("Table 4", "Summary"))
+
+table4_p
+
+#flextable::save_as_docx(table4_p, path = "Tables/table4.docx")        
+```
+
+
+```{r}
+agg_df$YEAR <- as.factor(agg_df$YEAR)
+agg_df$PUMA <- as.factor(agg_df$PUMA)
+```
+
+## Heteroskedasticity Test
+
+Breusch–Pagan test is performed to detect heteroskedasticity
+```{r}
+test <- agg_df %>%
+  mutate(EDUC2 = EDUC^2)
+m <- lm("log(INCOME) ~ EDUC", test)
+bptest(m)
+
+agg_df <- agg_df %>%
+  mutate(INCOME_LOG = log(INCOME))
+
+# all variables
+x_col <- c("REMOTE", "AGE", "HRSWORK", "EDUC", "EDUC", "FEMALE")
+h_test <- function(colname){
+  m <- lm(paste("INCOME ~ ", colname, sep=""), agg_df)
+  test.out <- bptest(m)
+  de <- data.frame(x = c(colname), 
+                    BP = c(test.out$statistic), 
+                    p.val = c(test.out$p.value), 
+                   df=c(test.out$parameter))
+  return(de)
+}
+result <- lapply(x_col, h_test)
+bind_rows(result, .id = "column_label")
+```
+Null Hypothesis: Homoscedasticity is present
+
+Alternative Hypothesis: Heteroscedasticity is present
+
+## Test multicolinearity
+```{r, include=FALSE}
+# Create formula
+race_col <- colnames(agg_df[, grep("RACE", colnames(agg_df))])[-1]
+occ_col <- colnames(agg_df[, grep("OCCSOC", colnames(agg_df))])[-1]
+
+r_formula <- paste(race_col, collapse = '+')
+o_formula <- paste(occ_col, collapse = '+')
+cov_formula <- paste0(r_formula, '+', o_formula)
+
+formula_lin <- paste0("INCOME_LOG ~ REMOTE + AGE + FEMALE + HRSWORK + EDUC", 
+                      "+", cov_formula)
+```
+
+```{r}
+# Multicolinearity test
+ols <-lm(formula_lin, data=agg_df)
+vif_val <- car::vif(ols)
+vif_val[vif_val > 5] 
+
+formula_lin <- gsub("OCCSOC53\\+","",formula_lin)
+
+olst <-lm(formula_lin, data=agg_df)
+
+vif_val <- car::vif(olst)
+vif_val[vif_val > 5] 
+```
+
+Multicolinearity between occupations are tested. Severe multicolinearity found in OCCSOC11, OCCSOC53, OCCSOC15, and OCCSOC47.
+
+## Test stationarity
+```{r}
+# Stationarity test on original data
+y <- data.frame(split(agg_df$INCOME, agg_df$PUMA))
+purtest(y, test = "hadri", exo = "intercept", lags = "AIC")
+
+# Stationarity test on Stochastic (difference from lag value) transformation
+diff_df1 <- agg_df %>%
+  group_by(PUMA) %>%
+  mutate(INCOME_DIFF = INCOME_LOG - dplyr::lag(INCOME_LOG, n=1), REMOTE_DIFF = REMOTE - dplyr::lag(REMOTE, n=1)) %>%
+  filter(YEAR != 2018)
+
+y_stochastic <- data.frame(split(diff_df1$INCOME_DIFF, diff_df1$PUMA))
+purtest_stochastic <- purtest(y_stochastic, test = "hadri", exo = "intercept", lags = "AIC")
+
+# Stationarity test on Deterministic (difference from model fitting) transformation
+diff_df2 <- agg_df %>%
+  mutate(REMOTE_LOG = log(REMOTE + 1))
+
+detrend_fun <- function(x){
+  # detrend using linear regression
+  trend <- lm(x ~ 1 + YEAR, diff_df2)
+  dt <- x - predict(trend)
+  colname <- deparse(substitute(x))
+  diff_df2[[colname]] <- dt
+}
+
+puma_year <- agg_df %>% select(PUMA, YEAR)
+detrend <- as.data.frame(lapply(diff_df2, detrend_fun)) %>% select(-c(PUMA, YEAR))
+diff_df2 <- cbind(puma_year, detrend)
+
+
+y_deterministic <- data.frame(split(diff_df2$REMOTE, diff_df2$PUMA))
+purtest_deterministic <- purtest(y_deterministic, test = "hadri", exo = "intercept", lags = "AIC")
+
+plotmeans(INCOME_LOG ~ YEAR, main="INCOME Trend - Stochastic", data=diff_df1)
+plotmeans(REMOTE ~ YEAR, main="Remote-work Trend - Stochastic", data=diff_df1)
+
+plotmeans(INCOME_LOG ~ YEAR, main="INCOME Trend - Deterministic", data=diff_df2)
+plotmeans(REMOTE ~ YEAR, main="Remote-work Trend - Deterministic", data=diff_df2)
+
+purtest_stochastic
+purtest_deterministic
+
+diff_df <- diff_df1
+```
+No need to test unit-root since T is very small. Detrended data using Stochastic process will be used.
+
+## Conintegration test
+```{r}
+coin <- coint.test(agg_df$INCOME, agg_df$REMOTE, d = 0, nlag = NULL, output = TRUE)
+coin
+```
+
+There is no cointegration for lag = 1 and lag = 2. The detrended data from the previous section will be used for non-fixed effect models. 
+
+
+# Models
+
+## Pooled OLS
+
+$$
+\begin{aligned}
+&\text{INCOME}_{i} = \alpha+\beta_{1}*\text{REMOTE}_{i}+\sum_{r}\beta_{2,r}*\text{RACE}_{i}+\sum_{o}\beta_{3,o}\text{OCCSOC}_{i}+\beta_{4}\text{FEMALE}_{i}+\beta_{5}\text{AGE}_{i}+\epsilon_{i}\\
+\end{aligned}
+$$
+
+
+
+```{r, include = FALSE}
+ols <-lm(formula_lin, data=diff_df)
+ols_robust <- coeftest(ols, vcov.=vcovHAC(ols, type='HC0',cluster="time"))
+ols_sum <- summary(ols)
+```
+
+
+```{r}
+plot(diff_df$REMOTE, diff_df$INCOME, pch=19, xlab="remote", ylab="average INCOME")
+abline(ols,lwd=3, col="red")
+```
+
+
+## Fixed effect regression
+
+Assumption: Linear additive model
+
+### Heterotenity across year
+```{r}
+plotmeans(INCOME ~ YEAR, main="INCOME Trend across years", data=agg_df)
+plotmeans(REMOTE ~ YEAR, main="Remote-work Trend across years", data=agg_df)
+
+```
+### Fixed effect with no covariates
+$$
+\begin{aligned}
+&INCOME_{i t}=\lambda_i+\gamma_t+\beta_{1}*REMOTE_{i t}+\epsilon_{i t}\\
+\end{aligned}
+$$
+
+```{r, include = FALSE}
+fixed_nc <- plm("INCOME_LOG ~ REMOTE",
+          data = agg_df, effect="twoways", index = c("PUMA", "YEAR"), model = "within", vcov=vcovHC)
+fixed_nc_robust <- coeftest(fixed_nc, vcov.=plm::vcovNW(fixed_nc, type='HC0',cluster="time"))
+fixed_nc_sum <- summary(fixed_nc)
+```
+
+
+### Fixed effect with covariates
+
+$$
+\begin{aligned}
+&INCOME_{i t}=\lambda_i+\gamma_t+\beta_{1}*REMOTE_{i t}+
+\sum_{r}\beta_{2,r}*\text{RACE}_{i t}+
+\sum_{o}\beta_{3,o}\text{OCCSOC}_{i t}+
+\beta_{4}\text{FEMALE}_{i t}+\beta_{5}\text{AGE}_{i t}+\epsilon_{i t}\\
+\end{aligned}
+$$
+
+```{r, include = FALSE}
+fixed <- plm(formula_lin,
+          data = agg_df, effect="twoways", index = c("PUMA", "YEAR"), model = "within", vcov=vcovHC)
+fixed_robust <- coeftest(fixed, vcov.=plm::vcovNW(fixed, type='HC0',cluster="time"))
+fixed_sum <- summary(fixed)
+```
+
+
+## Other models
+
+### FGLS
+
+From https://cran.r-project.org/web/packages/plm/plm.pdf
+
+"This framework allows the error covariance structure inside every
+group (if effect = "individual", else symmetric) of observations to be fully unrestricted and is
+therefore robust against any type of intragroup heteroskedasticity and serial correlation"
+
+```{r}
+base<-pdata.frame(diff_df, index = c("PUMA","YEAR"), drop.index = FALSE)
+fgls<-pggls(paste0("INCOME_LOG ~ REMOTE + AGE + FEMALE + HRSWORK + EDUC", 
+                      "+", cov_formula), model = c("within"), 
+           data=base, vcov=vcovHC(type="HC0", cluster="time"))
+fgls_robust<- coeftest(fgls)
+fgls_sum <- summary(fgls)
+```
+
+### AR
+
+```{r}
+df_ar<-diff_df %>%
+  mutate(YEAR = 2017+as.integer(YEAR)) %>%
+  as.data.frame()
+
+AR <- panelAR(formula_lin, 
+               data=df_ar, panelVar='PUMA', timeVar='YEAR', autoCorr='psar1',
+               panelCorrMethod='pcse', rho.na.rm=TRUE, panel.weight='t-1', bound.rho=TRUE)
+AR_robust <- coeftest(AR, vcov.=vcov(AR, type='HC0'))
+
+ar_pred <- predict(AR, df_ar)
+rss <- sum((as.numeric(unlist(ar_pred[1])) - df_ar$INCOME_LOG) ^ 2)  ## residual sum of squares
+tss <- sum((df_ar$INCOME_LOG - mean(df_ar$INCOME_LOG)) ^ 2)  ## total sum of squares
+rsq <- 1 - rss/tss
+```
+
+## Estimates
+
+```{r, results = "asis"}
+# Stargazer output (with and without RSE)
+est <- stargazer(ols, fixed_nc, fixed, fgls_robust, AR_robust, type = "text",
+          se = list(NULL, ols_robust[,2], fixed_nc_robust[, 2], 
+                    fixed_robust[, 2], 
+                     fgls_robust[,2], AR_robust[,2]),
+          keep = 'REMOTE',
+          column.labels = c("Pooled", "Fixed effect\\\\ & (No covariates)", 
+                            "Fixed effect", 
+                            "FGLS", "AR"),
+          column.sep.width = "-10pt", 
+          font.size = "small")
+```
+
+```{r}
+model_est <- data.frame("Var" = c("REMOTE", "SE", "pval", "Observations", "R2", "Adjusted R2", 
+                                  "F Statistic", "F statistic df"),
+                        "Pooled" = c(
+                          as.numeric(ols$coefficients["REMOTE"]), 
+                          ols_robust[,2]["REMOTE"],
+                          ols_robust[,4]["REMOTE"],
+                          nobs(ols),
+                          ols_sum$r.squared,
+                          ols_sum$adj.r.squared,
+                          ols_sum$fstatistic[1],
+                          paste(c("(df = ", ols_sum$fstatistic[2], "; ", ols_sum$fstatistic[3], ")"), collapse = '')
+                          ),
+                        "Fixed Effect (no covariate)" = c(
+                          as.numeric(fixed_nc$coefficients["REMOTE"]),
+                          fixed_nc_robust[,2],
+                          fixed_nc_robust[,4],
+                          nobs(fixed_nc),
+                          fixed_nc_sum$r.squared[1],
+                          fixed_nc_sum$r.squared[2],
+                          fixed_nc_sum$fstatistic$statistic,
+                          paste(c("(df = ", fixed_nc_sum$fstatistic$parameter[1], "; ", fixed_nc_sum$fstatistic$parameter[2], ")"), 
+                                collapse = '')
+                          ),
+                        "Fixed Effect" = c(
+                          as.numeric(fixed$coefficients["REMOTE"]),
+                          fixed_robust[,2]["REMOTE"],
+                          fixed_robust[,4]["REMOTE"], 
+                          nobs(fixed),
+                          fixed_sum$r.squared[1],
+                          fixed_sum$r.squared[2],
+                          fixed_sum$fstatistic$statistic,
+                          paste(c("(df = ", fixed_sum$fstatistic$parameter[1], "; ", fixed_sum$fstatistic$parameter[2], ")"), 
+                                collapse = '')
+                          ),
+                        "FGLS" = c(
+                          as.numeric(fgls$coefficients["REMOTE"]),
+                          fgls_robust[,2]["REMOTE"],
+                          fgls_robust[,4]["REMOTE"], 
+                          nobs(fgls),
+                          fgls_sum$rsqr,
+                          "NA",
+                          "NA",
+                          paste(c("(df = ", NULL, "; ", NULL, ")"), collapse = '')
+                          ),
+                        "AR" = c(
+                          as.numeric(AR$coefficients["REMOTE"]),
+                          AR_robust[,2]["REMOTE"],
+                          AR_robust[,4]["REMOTE"],
+                          "NA",
+                          "NA",
+                          "NA",
+                          "NA",
+                          paste(c("(df = ", NULL, "; ", NULL, ")"), collapse = '')
+                          )
+                        )
+
+table5_p <- nice_table(model_est,
+                       title = c("Table 5", "Estimation"),
+                       note = c(""))
+
+# flextable::save_as_docx(table5_p, path = "Tables/table5.docx") 
+```
+
+```{r}
+# find the average increase in share of remote workers in the sample and to show them what the equivalent in-sample predicted increase in average INCOME would be. 
+avg_remote <- agg_df %>%
+  group_by(YEAR) %>%
+  summarise(mean(REMOTE))
+
+0.073*(0.1967-0.0544)
+  
+predict(fixed, newdata = avg_remote)
+```
+
+
+# Robustness Checks
+
+```{r}
+models <- list(ols, fixed_nc, fixed)
+```
+
+#### Testing for fixed effects
+```{r}
+pFtest(fixed, ols)
+```
+H0: OLS is better than fixed.
+
+Choose fixed effect over pooled.
+
+#### Hausman test
+```{r}
+ph_test <- phtest(fixed, random)
+```
+
+Choose fixed effect over random effect.
+
+
+#### Testing for serial correlation
+```{r}
+durbinWatsonTest(ols)
+
+pdwtest(fixed)
+```
+
+
+```{r}
+bg <- sapply(models, function(m) bgtest(m, order=3))
+ bgtest(ols, order=3)
+```
+Since this p-value is less than 0.05, we can reject the null hypothesis and conclude that the residuals in this regression model are perfectly positive autocorrelated.
+
+
+## Check heteroskedasticity 
+```{r}
+#load lmtest library
+library(lmtest)
+bp <- sapply(models, function(m) bptest(m))
+bp
+
+bptest(AR)
+```
+
+Reject the null hypothesis: heteroscedasticity (Correlation with time) is present in the data. 
+
+```{r}
+pcdtest(fixed_nc)
+pcdtest(ar)
+```
+
+Fail to reject null hypothesis: no cross-sectional dependency in fixed model with covariates. 
+
+```{r}
+stationary.test(agg_df$INCOME_LOG, nlag = NULL, output = TRUE)
+tseries::adf.test(agg_df$REMOTE)
+FinTS::Unitroot(agg_df$REMOTE)
+```
+
+
+
+# References
+https://docs.iza.org/dp13524.pdf
+http://web.mit.edu/insong/www/pdf/FEmatch-twoway.pdf
